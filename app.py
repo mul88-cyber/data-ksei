@@ -55,62 +55,61 @@ def calculate_akumulasi_score(data, period_days):
         return pd.DataFrame()
 
     results = []
-    end_date = data['Last Trading Date'].max()
-    start_date = end_date - pd.DateOffset(days=period_days)
+    # Ambil tanggal-tanggal unik dan urutkan
+    unique_dates = sorted(data['Last Trading Date'].unique())
+    if len(unique_dates) < 2:
+        return pd.DataFrame() # Tidak cukup data untuk perbandingan
 
-    for code, group in data.groupby('Code'):
-        # Ambil data di akhir dan awal periode
-        end_data = group[group['Last Trading Date'] == end_date]
-        start_data_candidates = group[group['Last Trading Date'] <= start_date]
-        
-        if end_data.empty or start_data_candidates.empty:
-            continue
-
-        end_row = end_data.iloc[0]
-        start_row = start_data_candidates.iloc[-1] # Ambil data terdekat dari awal periode
-
-        # Hitung perubahan kepemilikan (delta) dalam lembar saham
-        delta_inst_local = end_row['Local_Institusi'] - start_row['Local_Institusi']
-        delta_inst_foreign = end_row['Foreign_Institusi'] - start_row['Foreign_Institusi']
-        delta_retail_local = end_row['Local_Retail'] - start_row['Local_Retail']
-        
-        # Hitung perubahan harga
-        price_change = ((end_row['Price'] - start_row['Price']) / start_row['Price']) * 100 if start_row['Price'] > 0 else 0
-
-        results.append({
-            'Saham': code,
-            'Nama Perusahaan': end_row.get('Description', code),
-            'Sektor': end_row.get('Sector', 'N/A'),
-            'Harga Akhir': end_row['Price'],
-            'Perubahan Harga %': price_change,
-            'Akumulasi Inst. Lokal': delta_inst_local,
-            'Akumulasi Inst. Asing': delta_inst_foreign,
-            'Perubahan Ritel Lokal': delta_retail_local
-        })
-
-    if not results:
-        return pd.DataFrame()
-
-    result_df = pd.DataFrame(results)
-
-    # --- Logika Scoring ---
-    # Normalisasi perubahan kepemilikan agar bisa dijumlahkan
-    result_df['Skor_Inst_Lokal'] = (result_df['Akumulasi Inst. Lokal'] - result_df['Akumulasi Inst. Lokal'].mean()) / result_df['Akumulasi Inst. Lokal'].std()
-    result_df['Skor_Inst_Asing'] = (result_df['Akumulasi Inst. Asing'] - result_df['Akumulasi Inst. Asing'].mean()) / result_df['Akumulasi Inst. Asing'].std()
-    # Skor untuk distribusi ritel (semakin negatif perubahannya, semakin tinggi skornya)
-    result_df['Skor_Retail'] = -(result_df['Perubahan Ritel Lokal'] - result_df['Perubahan Ritel Lokal'].mean()) / result_df['Perubahan Ritel Lokal'].std()
+    end_date = unique_dates[-1]
     
-    # Skor akhir adalah gabungan dari ketiganya, dengan bobot
+    # Tentukan tanggal awal berdasarkan periode, cari tanggal terdekat yang ada di data
+    start_date_target = end_date - pd.DateOffset(days=period_days)
+    available_past_dates = [d for d in unique_dates if d <= start_date_target]
+    if not available_past_dates:
+        return pd.DataFrame() # Tidak ada data historis yang cukup jauh
+    start_date = available_past_dates[-1]
+
+
+    end_data_df = data[data['Last Trading Date'] == end_date].set_index('Code')
+    start_data_df = data[data['Last Trading Date'] == start_date].set_index('Code')
+
+    # Gabungkan data awal dan akhir untuk perhitungan yang efisien
+    merged_df = end_data_df.join(start_data_df, lsuffix='_end', rsuffix='_start')
+    
+    # Hitung perubahan
+    merged_df['delta_inst_local'] = merged_df['Local_Institusi_end'] - merged_df['Local_Institusi_start']
+    merged_df['delta_inst_foreign'] = merged_df['Foreign_Institusi_end'] - merged_df['Foreign_Institusi_start']
+    merged_df['delta_retail_local'] = merged_df['Local_Retail_end'] - merged_df['Local_Retail_start']
+    merged_df['price_change'] = ((merged_df['Price_end'] - merged_df['Price_start']) / merged_df['Price_start'].replace(0, np.nan)) * 100
+    
+    result_df = merged_df.reset_index()
+    
+    # --- Logika Scoring ---
+    result_df['Skor_Inst_Lokal'] = (result_df['delta_inst_local'] - result_df['delta_inst_local'].mean()) / result_df['delta_inst_local'].std()
+    result_df['Skor_Inst_Asing'] = (result_df['delta_inst_foreign'] - result_df['delta_inst_foreign'].mean()) / result_df['delta_inst_foreign'].std()
+    result_df['Skor_Retail'] = -(result_df['delta_retail_local'] - result_df['delta_retail_local'].mean()) / result_df['delta_retail_local'].std()
+    
     result_df['Skor Akumulasi'] = (
         result_df['Skor_Inst_Lokal'].fillna(0) * 0.4 +
         result_df['Skor_Inst_Asing'].fillna(0) * 0.4 +
         result_df['Skor_Retail'].fillna(0) * 0.2
     )
+    result_df.loc[result_df['price_change'] > 0, 'Skor Akumulasi'] += 0.5
     
-    # Beri bonus jika harga juga naik
-    result_df.loc[result_df['Perubahan Harga %'] > 0, 'Skor Akumulasi'] += 0.5
+    # Finalisasi kolom untuk display
+    final_df = pd.DataFrame({
+        'Saham': result_df['Code'],
+        'Nama Perusahaan': result_df.get('Description_end', result_df['Code']),
+        'Sektor': result_df.get('Sector_end', 'N/A'),
+        'Harga Akhir': result_df['Price_end'],
+        'Perubahan Harga %': result_df['price_change'],
+        'Akumulasi Inst. Lokal': result_df['delta_inst_local'],
+        'Akumulasi Inst. Asing': result_df['delta_inst_foreign'],
+        'Perubahan Ritel Lokal': result_df['delta_retail_local'],
+        'Skor Akumulasi': result_df['Skor Akumulasi']
+    })
     
-    return result_df.sort_values(by='Skor Akumulasi', ascending=False)
+    return final_df.sort_values(by='Skor Akumulasi', ascending=False)
 
 # --- Tampilan Utama ---
 st.header("🏆 Top 27 Saham Akumulasi Institusi")
@@ -136,7 +135,6 @@ if not df.empty:
 
                 st.success(f"Ditemukan **{len(top_27)}** saham dengan akumulasi institusi tertinggi.")
                 
-                # Format tampilan angka agar mudah dibaca
                 display_df = top_27.style.format({
                     'Harga Akhir': "Rp {:,.0f}",
                     'Perubahan Harga %': "{:.2f}%",
