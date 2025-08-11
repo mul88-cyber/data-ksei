@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # --- Konfigurasi Halaman & CSS Kustom ---
 st.set_page_config(page_title="Dashboard Analisa KSEI", layout="wide")
@@ -23,13 +25,10 @@ def load_data():
     csv_url = "https://storage.googleapis.com/stock-csvku/hasil_gabungan_ksei.csv"
     try:
         df = pd.read_csv(csv_url)
-        # Ganti nama kolom 'Date' jika ada, agar konsisten
         if 'Date' in df.columns:
             df.rename(columns={'Date': 'Last Trading Date'}, inplace=True)
-
         df['Last Trading Date'] = pd.to_datetime(df['Last Trading Date'], errors='coerce')
         
-        # Kolom numerik yang relevan dari data KSEI
         numeric_cols = [
             'Price', 'Total_Local', 'Total_Foreign', 'Total_Saham_KSEI', 'Market_Cap',
             'KSEI_Local_%', 'KSEI_Foreign_%', 'Local_Retail', 'Local_Institusi',
@@ -50,33 +49,23 @@ df = load_data()
 # --- Fungsi Analisa & Scoring ---
 @st.cache_data(ttl=3600)
 def calculate_akumulasi_score(data, period_days):
-    """Menghitung skor akumulasi institusi berdasarkan perubahan kepemilikan."""
-    if data.empty:
-        return pd.DataFrame()
-
+    """Menghitung skor akumulasi institusi."""
+    if data.empty: return pd.DataFrame()
     results = []
-    # Ambil tanggal-tanggal unik dan urutkan
     unique_dates = sorted(data['Last Trading Date'].unique())
-    if len(unique_dates) < 2:
-        return pd.DataFrame() # Tidak cukup data untuk perbandingan
+    if len(unique_dates) < 2: return pd.DataFrame()
 
     end_date = unique_dates[-1]
-    
-    # Tentukan tanggal awal berdasarkan periode, cari tanggal terdekat yang ada di data
     start_date_target = end_date - pd.DateOffset(days=period_days)
     available_past_dates = [d for d in unique_dates if d <= start_date_target]
-    if not available_past_dates:
-        return pd.DataFrame() # Tidak ada data historis yang cukup jauh
+    if not available_past_dates: return pd.DataFrame()
     start_date = available_past_dates[-1]
-
 
     end_data_df = data[data['Last Trading Date'] == end_date].set_index('Code')
     start_data_df = data[data['Last Trading Date'] == start_date].set_index('Code')
-
-    # Gabungkan data awal dan akhir untuk perhitungan yang efisien
+    
     merged_df = end_data_df.join(start_data_df, lsuffix='_end', rsuffix='_start')
     
-    # Hitung perubahan
     merged_df['delta_inst_local'] = merged_df['Local_Institusi_end'] - merged_df['Local_Institusi_start']
     merged_df['delta_inst_foreign'] = merged_df['Foreign_Institusi_end'] - merged_df['Foreign_Institusi_start']
     merged_df['delta_retail_local'] = merged_df['Local_Retail_end'] - merged_df['Local_Retail_start']
@@ -84,7 +73,6 @@ def calculate_akumulasi_score(data, period_days):
     
     result_df = merged_df.reset_index()
     
-    # --- Logika Scoring ---
     result_df['Skor_Inst_Lokal'] = (result_df['delta_inst_local'] - result_df['delta_inst_local'].mean()) / result_df['delta_inst_local'].std()
     result_df['Skor_Inst_Asing'] = (result_df['delta_inst_foreign'] - result_df['delta_inst_foreign'].mean()) / result_df['delta_inst_foreign'].std()
     result_df['Skor_Retail'] = -(result_df['delta_retail_local'] - result_df['delta_retail_local'].mean()) / result_df['delta_retail_local'].std()
@@ -96,58 +84,105 @@ def calculate_akumulasi_score(data, period_days):
     )
     result_df.loc[result_df['price_change'] > 0, 'Skor Akumulasi'] += 0.5
     
-    # Finalisasi kolom untuk display
     final_df = pd.DataFrame({
-        'Saham': result_df['Code'],
-        'Nama Perusahaan': result_df.get('Description_end', result_df['Code']),
-        'Sektor': result_df.get('Sector_end', 'N/A'),
-        'Harga Akhir': result_df['Price_end'],
-        'Perubahan Harga %': result_df['price_change'],
-        'Akumulasi Inst. Lokal': result_df['delta_inst_local'],
-        'Akumulasi Inst. Asing': result_df['delta_inst_foreign'],
-        'Perubahan Ritel Lokal': result_df['delta_retail_local'],
+        'Saham': result_df['Code'], 'Nama Perusahaan': result_df.get('Description_end', result_df['Code']),
+        'Sektor': result_df.get('Sector_end', 'N/A'), 'Harga Akhir': result_df['Price_end'],
+        'Perubahan Harga %': result_df['price_change'], 'Akumulasi Inst. Lokal': result_df['delta_inst_local'],
+        'Akumulasi Inst. Asing': result_df['delta_inst_foreign'], 'Perubahan Ritel Lokal': result_df['delta_retail_local'],
         'Skor Akumulasi': result_df['Skor Akumulasi']
     })
     
     return final_df.sort_values(by='Skor Akumulasi', ascending=False)
 
-# --- Tampilan Utama ---
-st.header("🏆 Top 27 Saham Akumulasi Institusi")
-st.markdown("Menyaring saham berdasarkan akumulasi bersih oleh **Institusi Lokal & Asing**, serta distribusi oleh **Ritel Lokal** dalam periode waktu tertentu.")
+# --- Fungsi Grafik Detail ---
+def create_detail_charts(data, code):
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.6, 0.4],
+        subplot_titles=(f"Pergerakan Harga Saham {code}", "Perubahan Kepemilikan (dalam Lembar Saham)")
+    )
+    
+    # Grafik 1: Harga
+    fig.add_trace(go.Scatter(
+        x=data['Last Trading Date'], y=data['Price'],
+        name='Harga', mode='lines', line=dict(color='cyan', width=2)
+    ), row=1, col=1)
+    
+    # Grafik 2: Perubahan Kepemilikan
+    investor_groups = ['Local_Institusi', 'Local_Retail', 'Foreign_Institusi', 'Foreign_Retail']
+    colors = {'Local_Institusi': '#1f77b4', 'Local_Retail': '#ff7f0e', 'Foreign_Institusi': '#2ca02c', 'Foreign_Retail': '#d62728'}
+    
+    for group in investor_groups:
+        # Hitung perubahan (delta) dari hari pertama
+        delta_kepemilikan = data[group] - data[group].iloc[0]
+        fig.add_trace(go.Scatter(
+            x=data['Last Trading Date'], y=delta_kepemilikan,
+            name=group.replace('_', ' '), mode='lines',
+            line=dict(width=2.5),
+            fill='tozeroy' if group == investor_groups[0] else 'tonexty', # Stacked area chart
+            stackgroup='one',
+            marker_color=colors[group]
+        ), row=2, col=1)
 
-if not df.empty:
-    # Filter di Sidebar
-    st.sidebar.header("🔍 Filter Analisa")
-    period_options = {
-        "1 Bulan Terakhir": 30,
-        "3 Bulan Terakhir": 90,
-        "6 Bulan Terakhir": 180
-    }
-    selected_period_label = st.sidebar.selectbox("Pilih Periode Analisa", options=list(period_options.keys()))
-    period_days = period_options[selected_period_label]
+    fig.update_layout(height=700, template='plotly_dark', legend_traceorder='normal')
+    fig.update_yaxes(title_text="Harga (Rp)", row=1, col=1)
+    fig.update_yaxes(title_text="Perubahan (Lembar)", row=2, col=1)
+    st.plotly_chart(fig, use_container_width=True)
 
-    if st.sidebar.button("Jalankan Analisa", use_container_width=True):
-        with st.spinner(f"Menganalisa perubahan kepemilikan dalam {selected_period_label}..."):
-            final_results = calculate_akumulasi_score(df, period_days)
-            
-            if not final_results.empty:
-                top_27 = final_results.head(27)
 
-                st.success(f"Ditemukan **{len(top_27)}** saham dengan akumulasi institusi tertinggi.")
-                
-                display_df = top_27.style.format({
-                    'Harga Akhir': "Rp {:,.0f}",
-                    'Perubahan Harga %': "{:.2f}%",
-                    'Akumulasi Inst. Lokal': "{:,.0f} lbr",
-                    'Akumulasi Inst. Asing': "{:,.0f} lbr",
-                    'Perubahan Ritel Lokal': "{:,.0f} lbr",
-                    'Skor Akumulasi': "{:.2f}"
-                }).background_gradient(cmap='Greens', subset=['Skor Akumulasi'])
+# --- Tampilan Utama dengan Tab ---
+tab_top27, tab_detail = st.tabs(["🏆 Top 27 Akumulasi Institusi", "📊 Analisa Detail"])
 
-                st.dataframe(display_df, use_container_width=True, height=950)
-            else:
-                st.warning("Tidak cukup data untuk melakukan analisa pada periode yang dipilih.")
+with tab_top27:
+    st.header("🏆 Top 27 Saham Akumulasi Institusi")
+    st.markdown("Menyaring saham berdasarkan akumulasi bersih oleh **Institusi Lokal & Asing**, serta distribusi oleh **Ritel Lokal** dalam periode waktu tertentu.")
+
+    if not df.empty:
+        period_options = {"1 Bulan Terakhir": 30, "3 Bulan Terakhir": 90, "6 Bulan Terakhir": 180}
+        selected_period_label = st.selectbox("Pilih Periode Analisa", options=list(period_options.keys()))
+        period_days = period_options[selected_period_label]
+
+        if st.button("Jalankan Analisa", use_container_width=True):
+            with st.spinner(f"Menganalisa..."):
+                final_results = calculate_akumulasi_score(df, period_days)
+                if not final_results.empty:
+                    top_27 = final_results.head(27)
+                    st.success(f"Ditemukan **{len(top_27)}** saham dengan akumulasi institusi tertinggi.")
+                    display_df = top_27.style.format({
+                        'Harga Akhir': "Rp {:,.0f}", 'Perubahan Harga %': "{:.2f}%",
+                        'Akumulasi Inst. Lokal': "{:,.0f} lbr", 'Akumulasi Inst. Asing': "{:,.0f} lbr",
+                        'Perubahan Ritel Lokal': "{:,.0f} lbr", 'Skor Akumulasi': "{:.2f}"
+                    }).background_gradient(cmap='Greens', subset=['Skor Akumulasi'])
+                    st.dataframe(display_df, use_container_width=True, height=950)
+                else:
+                    st.warning("Tidak cukup data untuk analisa pada periode yang dipilih.")
     else:
-        st.info("Pilih periode analisa di sidebar dan klik 'Jalankan Analisa' untuk memulai.")
-else:
-    st.warning("Gagal memuat data. Tidak bisa melanjutkan analisa.")
+        st.warning("Gagal memuat data.")
+
+with tab_detail:
+    st.header("📊 Analisa Detail Kepemilikan Saham")
+    if not df.empty:
+        st.sidebar.header("🔍 Filter Analisa Detail")
+        
+        all_stocks = sorted(df['Code'].unique())
+        selected_stock = st.sidebar.selectbox("Pilih Saham", all_stocks, index=all_stocks.index("BBRI") if "BBRI" in all_stocks else 0)
+        
+        period_options_detail = {"3 Bulan": 90, "6 Bulan": 180, "1 Tahun": 365, "Semua Data": 9999}
+        selected_period_detail = st.sidebar.selectbox("Pilih Periode Grafik", options=list(period_options_detail.keys()))
+        period_days_detail = period_options_detail[selected_period_detail]
+        
+        stock_data = df[df['Code'] == selected_stock].copy()
+        
+        if not stock_data.empty:
+            # Filter data berdasarkan periode yang dipilih
+            end_date = stock_data['Last Trading Date'].max()
+            start_date = end_date - pd.DateOffset(days=period_days_detail)
+            display_data = stock_data[stock_data['Last Trading Date'] >= start_date]
+
+            st.markdown(f"Menampilkan analisa untuk **{selected_stock}** dalam **{selected_period_detail}**.")
+            create_detail_charts(display_data, selected_stock)
+        else:
+            st.warning(f"Tidak ada data untuk saham {selected_stock}.")
+    else:
+        st.warning("Gagal memuat data.")
