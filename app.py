@@ -95,12 +95,12 @@ def calculate_akumulasi_score(data, period_days):
     return final_df.sort_values(by='Skor Akumulasi', ascending=False)
 
 # --- Fungsi Grafik Detail ---
-def create_detail_charts(data, code):
+def create_detail_charts(data, code, view_mode):
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         vertical_spacing=0.05,
         row_heights=[0.6, 0.4],
-        subplot_titles=(f"Pergerakan Harga Saham {code}", "Perubahan Kepemilikan (dalam Lembar Saham)")
+        subplot_titles=(f"Pergerakan Harga Saham {code}", f"Aliran Dana Kepemilikan ({view_mode})")
     )
     
     # Grafik 1: Harga
@@ -109,25 +109,45 @@ def create_detail_charts(data, code):
         name='Harga', mode='lines', line=dict(color='cyan', width=2)
     ), row=1, col=1)
     
-    # Grafik 2: Perubahan Kepemilikan
+    # Grafik 2: Aliran Dana Kepemilikan
     investor_groups = ['Local_Institusi', 'Local_Retail', 'Foreign_Institusi', 'Foreign_Retail']
     colors = {'Local_Institusi': '#1f77b4', 'Local_Retail': '#ff7f0e', 'Foreign_Institusi': '#2ca02c', 'Foreign_Retail': '#d62728'}
     
+    # Siapkan hover text
     for group in investor_groups:
-        # Hitung perubahan (delta) dari hari pertama
-        delta_kepemilikan = data[group] - data[group].iloc[0]
-        fig.add_trace(go.Scatter(
-            x=data['Last Trading Date'], y=delta_kepemilikan,
-            name=group.replace('_', ' '), mode='lines',
-            line=dict(width=2.5),
-            fill='tozeroy' if group == investor_groups[0] else 'tonexty', # Stacked area chart
-            stackgroup='one',
-            marker_color=colors[group]
-        ), row=2, col=1)
+        data[f'{group}_hover'] = data[group].apply(lambda x: f'{x:,.0f} lbr')
+
+    if view_mode == 'Nilai Absolut':
+        for group in investor_groups:
+            fig.add_trace(go.Scatter(
+                x=data['Last Trading Date'], y=data[group],
+                name=group.replace('_', ' '), mode='lines',
+                customdata=data[f'{group}_hover'],
+                hovertemplate='%{customdata}<extra></extra>',
+                line=dict(width=2.5),
+                fill='tozeroy' if group == investor_groups[0] else 'tonexty',
+                stackgroup='one',
+                marker_color=colors[group]
+            ), row=2, col=1)
+        fig.update_yaxes(title_text="Total Kepemilikan (Lembar)", row=2, col=1)
+
+    elif view_mode == 'Persentase':
+        # Gunakan 'groupnorm' untuk membuat 100% stacked area chart
+        for group in investor_groups:
+            fig.add_trace(go.Scatter(
+                x=data['Last Trading Date'], y=data[group],
+                name=group.replace('_', ' '), mode='lines',
+                customdata=data[f'{group}_hover'],
+                hovertemplate='%{customdata}<extra></extra>',
+                line=dict(width=2.5),
+                fill='tozeroy' if group == investor_groups[0] else 'tonexty',
+                stackgroup='one', groupnorm='percent',
+                marker_color=colors[group]
+            ), row=2, col=1)
+        fig.update_yaxes(title_text="Persentase Kepemilikan (%)", row=2, col=1, ticksuffix='%')
 
     fig.update_layout(height=700, template='plotly_dark', legend_traceorder='normal')
     fig.update_yaxes(title_text="Harga (Rp)", row=1, col=1)
-    fig.update_yaxes(title_text="Perubahan (Lembar)", row=2, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -175,13 +195,21 @@ with tab_detail:
         stock_data = df[df['Code'] == selected_stock].copy()
         
         if not stock_data.empty:
-            # Filter data berdasarkan periode yang dipilih
             end_date = stock_data['Last Trading Date'].max()
             start_date = end_date - pd.DateOffset(days=period_days_detail)
             display_data = stock_data[stock_data['Last Trading Date'] >= start_date]
 
             st.markdown(f"Menampilkan analisa untuk **{selected_stock}** dalam **{selected_period_detail}**.")
-            create_detail_charts(display_data, selected_stock)
+            
+            # --- PENAMBAHAN BARU: Tombol Toggle Mode Grafik ---
+            view_mode = st.radio(
+                "Pilih Mode Tampilan Grafik Kepemilikan:",
+                ('Nilai Absolut', 'Persentase'),
+                horizontal=True,
+                label_visibility='collapsed'
+            )
+            
+            create_detail_charts(display_data, selected_stock, view_mode)
         else:
             st.warning(f"Tidak ada data untuk saham {selected_stock}.")
     else:
