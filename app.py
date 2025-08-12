@@ -27,6 +27,7 @@ def load_data():
         df = pd.read_csv(csv_url)
         if 'Date' in df.columns:
             df.rename(columns={'Date': 'Last Trading Date'}, inplace=True)
+
         df['Last Trading Date'] = pd.to_datetime(df['Last Trading Date'], errors='coerce')
         
         numeric_cols = [
@@ -49,7 +50,7 @@ df = load_data()
 # --- Fungsi Analisa & Scoring ---
 @st.cache_data(ttl=3600)
 def calculate_akumulasi_score(data, period_days):
-    """Menghitung skor akumulasi institusi."""
+    """Menghitung skor akumulasi institusi berdasarkan perubahan kepemilikan."""
     if data.empty: return pd.DataFrame()
     results = []
     unique_dates = sorted(data['Last Trading Date'].unique())
@@ -96,10 +97,12 @@ def calculate_akumulasi_score(data, period_days):
 
 # --- Fungsi Grafik Detail ---
 def create_detail_charts(data, code, view_mode):
+    # Buat subplot dengan 2 baris, di mana baris bawah punya sumbu Y ganda
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         vertical_spacing=0.05,
-        row_heights=[0.6, 0.4],
+        row_heights=[0.5, 0.5],
+        specs=[[{"secondary_y": False}], [{"secondary_y": True}]],
         subplot_titles=(f"Pergerakan Harga Saham {code}", f"Aliran Dana Kepemilikan ({view_mode})")
     )
     
@@ -110,46 +113,46 @@ def create_detail_charts(data, code, view_mode):
     ), row=1, col=1)
     
     # Grafik 2: Aliran Dana Kepemilikan
-    investor_groups = ['Local_Institusi', 'Local_Retail', 'Foreign_Institusi', 'Foreign_Retail']
+    investor_groups_inst = ['Local_Institusi', 'Foreign_Institusi']
+    investor_groups_retail = ['Local_Retail', 'Foreign_Retail']
     colors = {'Local_Institusi': '#1f77b4', 'Local_Retail': '#ff7f0e', 'Foreign_Institusi': '#2ca02c', 'Foreign_Retail': '#d62728'}
     
-    # Siapkan hover text
-    for group in investor_groups:
-        data[f'{group}_hover'] = data[group].apply(lambda x: f'{x:,.0f} lbr')
-
     if view_mode == 'Nilai Absolut':
-        for group in investor_groups:
+        # Sumbu Y Kiri untuk Institusi
+        for group in investor_groups_inst:
             fig.add_trace(go.Scatter(
-                x=data['Last Trading Date'], y=data[group],
-                name=group.replace('_', ' '), mode='lines',
-                customdata=data[f'{group}_hover'],
-                hovertemplate='%{customdata}<extra></extra>',
-                line=dict(width=2.5),
-                fill='tozeroy' if group == investor_groups[0] else 'tonexty',
-                stackgroup='one',
-                marker_color=colors[group]
-            ), row=2, col=1)
-        fig.update_yaxes(title_text="Total Kepemilikan (Lembar)", row=2, col=1)
+                x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
+                mode='lines', line=dict(width=2.5, color=colors[group])
+            ), secondary_y=False, row=2, col=1)
+
+        # Sumbu Y Kanan untuk Ritel
+        for group in investor_groups_retail:
+            fig.add_trace(go.Scatter(
+                x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
+                mode='lines', line=dict(width=2.5, dash='dash', color=colors[group])
+            ), secondary_y=True, row=2, col=1)
+        
+        fig.update_yaxes(title_text="Kepemilikan Institusi (Lbr)", secondary_y=False, row=2, col=1)
+        fig.update_yaxes(title_text="Kepemilikan Ritel (Lbr)", secondary_y=True, row=2, col=1, showgrid=False)
 
     elif view_mode == 'Persentase':
         # Gunakan 'groupnorm' untuk membuat 100% stacked area chart
-        for group in investor_groups:
+        all_groups = investor_groups_inst + investor_groups_retail
+        for group in all_groups:
             fig.add_trace(go.Scatter(
-                x=data['Last Trading Date'], y=data[group],
-                name=group.replace('_', ' '), mode='lines',
-                customdata=data[f'{group}_hover'],
-                hovertemplate='%{customdata}<extra></extra>',
-                line=dict(width=2.5),
-                fill='tozeroy' if group == investor_groups[0] else 'tonexty',
+                x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
+                mode='lines', line=dict(width=2.5),
+                fill='tozeroy' if group == all_groups[0] else 'tonexty',
                 stackgroup='one', groupnorm='percent',
                 marker_color=colors[group]
-            ), row=2, col=1)
-        fig.update_yaxes(title_text="Persentase Kepemilikan (%)", row=2, col=1, ticksuffix='%')
+            ), secondary_y=False, row=2, col=1) # Semua di sumbu Y utama
+        
+        fig.update_yaxes(title_text="Persentase Kepemilikan (%)", secondary_y=False, row=2, col=1, ticksuffix='%')
+        fig.update_yaxes(visible=False, secondary_y=True, row=2, col=1) # Sembunyikan sumbu Y kanan
 
-    fig.update_layout(height=700, template='plotly_dark', legend_traceorder='normal')
+    fig.update_layout(height=800, template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     fig.update_yaxes(title_text="Harga (Rp)", row=1, col=1)
     st.plotly_chart(fig, use_container_width=True)
-
 
 # --- Tampilan Utama dengan Tab ---
 tab_top27, tab_detail = st.tabs(["🏆 Top 27 Akumulasi Institusi", "📊 Analisa Detail"])
@@ -201,7 +204,6 @@ with tab_detail:
 
             st.markdown(f"Menampilkan analisa untuk **{selected_stock}** dalam **{selected_period_detail}**.")
             
-            # --- PENAMBAHAN BARU: Tombol Toggle Mode Grafik ---
             view_mode = st.radio(
                 "Pilih Mode Tampilan Grafik Kepemilikan:",
                 ('Nilai Absolut', 'Persentase'),
