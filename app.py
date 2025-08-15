@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- Konfigurasi Halaman & CSS Kustom ---
-st.set_page_config(page_title="Dashboard Analisa Switching", layout="wide")
+st.set_page_config(page_title="Dashboard Analisa KSEI", layout="wide")
 st.markdown("""
 <style>
 /* CSS Kustom */
@@ -21,7 +21,7 @@ st.title("🚀 Dasbor Analisa Switching Kepemilikan")
 # --- Load Data & Kalkulasi ---
 @st.cache_data(ttl=3600)
 def load_data():
-    """Memuat dan membersihkan data KSEI dari URL."""
+    """Memuat data KSEI dari URL dan menghitung kolom agregat."""
     csv_url = "https://storage.googleapis.com/stock-csvku/hasil_gabungan_ksei.csv"
     try:
         df = pd.read_csv(csv_url)
@@ -30,19 +30,34 @@ def load_data():
 
         df['Last Trading Date'] = pd.to_datetime(df['Last Trading Date'], errors='coerce')
         
-        numeric_cols = [
-            'Price', 'Total_Local', 'Total_Foreign', 'Total_Saham_KSEI', 'Market_Cap',
-            'KSEI_Local_%', 'KSEI_Foreign_%', 'Local_Retail', 'Local_Institusi',
-            'Foreign_Retail', 'Foreign_Institusi', 'KSEI_Float_%'
+        # --- PERBAIKAN: Hitung kolom agregat di sini ---
+        # 1. Ganti nama kolom Total
+        if 'Total' in df.columns and 'Total.1' in df.columns:
+            df.rename(columns={'Total': 'Total_Local', 'Total.1': 'Total_Foreign'}, inplace=True)
+        
+        # 2. Konversi semua kolom kepemilikan ke numerik
+        owner_cols = [
+            'Price', 'Local IS', 'Local CP', 'Local PF', 'Local IB', 'Local ID', 'Local MF', 'Local SC', 'Local FD', 'Local OT', 'Total_Local',
+            'Foreign IS', 'Foreign CP', 'Foreign PF', 'Foreign IB', 'Foreign ID', 'Foreign MF', 'Foreign SC', 'Foreign FD', 'Foreign OT', 'Total_Foreign'
         ]
-        for col in numeric_cols:
+        for col in owner_cols:
              if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # 3. Buat grup institusi dan ritel
+        local_institution_cols = ['Local IS', 'Local CP', 'Local PF', 'Local IB', 'Local MF', 'Local SC', 'Local FD', 'Local OT']
+        foreign_institution_cols = ['Foreign IS', 'Foreign CP', 'Foreign PF', 'Foreign IB', 'Foreign MF', 'Foreign SC', 'Foreign FD', 'Foreign OT']
+        
+        df['Local_Retail'] = df.get('Local ID', 0)
+        df['Local_Institusi'] = df[[c for c in local_institution_cols if c in df.columns]].sum(axis=1)
+        df['Foreign_Retail'] = df.get('Foreign ID', 0)
+        df['Foreign_Institusi'] = df[[c for c in foreign_institution_cols if c in df.columns]].sum(axis=1)
+        df['Total_Saham_KSEI'] = df.get('Total_Local', 0) + df.get('Total_Foreign', 0)
 
         df.sort_values(by=['Code', 'Last Trading Date'], inplace=True)
         return df
     except Exception as e:
-        st.error(f"Gagal memuat data dari URL: {e}")
+        st.error(f"Gagal memuat atau memproses data dari URL: {e}")
         return pd.DataFrame()
 
 df = load_data()
@@ -73,11 +88,9 @@ def calculate_switching_score(data, period_days):
     merged_df['delta_retail_local'] = merged_df['Local_Retail_end'] - merged_df['Local_Retail_start']
     merged_df['delta_retail_foreign'] = merged_df['Foreign_Retail_end'] - merged_df['Foreign_Retail_start']
 
-    # Hitung total perubahan institusi dan ritel
     merged_df['total_inst_change'] = merged_df['delta_inst_local'] + merged_df['delta_inst_foreign']
     merged_df['total_retail_change'] = merged_df['delta_retail_local'] + merged_df['delta_retail_foreign']
     
-    # Hitung Switching Score
     merged_df['switching_score'] = merged_df['total_inst_change'] - merged_df['total_retail_change']
     
     result_df = merged_df.reset_index()
@@ -96,39 +109,38 @@ def calculate_switching_score(data, period_days):
 # --- Fungsi Grafik Detail ---
 def create_switching_charts(data, code):
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.5, 0.5],
-        subplot_titles=(f"Pergerakan Harga Saham {code}", "Perubahan Kepemilikan (Delta dari Awal Periode)")
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        row_heights=[0.5, 0.5], specs=[[{"secondary_y": False}], [{"secondary_y": True}]],
+        subplot_titles=(f"Pergerakan Harga Saham {code}", "Kepemilikan Absolut (dalam Lembar Saham)")
     )
     
-    # Grafik 1: Harga
     fig.add_trace(go.Scatter(
         x=data['Last Trading Date'], y=data['Price'],
         name='Harga', mode='lines', line=dict(color='cyan', width=2)
     ), row=1, col=1)
     
-    # Grafik 2: Perubahan Kepemilikan
-    investor_groups = ['Local_Institusi', 'Local_Retail', 'Foreign_Institusi', 'Foreign_Retail']
+    investor_groups_inst = ['Local_Institusi', 'Foreign_Institusi']
+    investor_groups_retail = ['Local_Retail', 'Foreign_Retail']
     colors = {'Local_Institusi': '#1f77b4', 'Local_Retail': '#ff7f0e', 'Foreign_Institusi': '#2ca02c', 'Foreign_Retail': '#d62728'}
     
-    for group in investor_groups:
-        # Hitung perubahan (delta) dari hari pertama dalam data yang ditampilkan
-        delta_kepemilikan = data[group] - data[group].iloc[0]
+    for group in investor_groups_inst:
         fig.add_trace(go.Scatter(
-            x=data['Last Trading Date'], y=delta_kepemilikan,
-            name=group.replace('_', ' '), mode='lines',
-            line=dict(width=2.5),
-            fill='tozeroy' if group == investor_groups[0] else 'tonexty',
-            stackgroup='one',
-            marker_color=colors[group]
-        ), row=2, col=1)
+            x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
+            mode='lines', line=dict(width=2.5, color=colors[group])
+        ), secondary_y=False, row=2, col=1)
 
-    fig.update_layout(height=700, template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    for group in investor_groups_retail:
+        fig.add_trace(go.Scatter(
+            x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
+            mode='lines', line=dict(width=2.5, dash='dash', color=colors[group])
+        ), secondary_y=True, row=2, col=1)
+        
+    fig.update_layout(height=800, template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     fig.update_yaxes(title_text="Harga (Rp)", row=1, col=1)
-    fig.update_yaxes(title_text="Perubahan (Lembar)", row=2, col=1)
+    fig.update_yaxes(title_text="Kepemilikan Institusi (Lbr)", secondary_y=False, row=2, col=1)
+    fig.update_yaxes(title_text="Kepemilikan Ritel (Lbr)", secondary_y=True, row=2, col=1, showgrid=False)
+    
     st.plotly_chart(fig, use_container_width=True)
-
 
 # --- Tampilan Utama dengan Tab ---
 tab_screener, tab_detail = st.tabs(["🏆 Screener Saham Switching", "📊 Analisa Detail"])
@@ -146,7 +158,7 @@ with tab_screener:
             with st.spinner(f"Menganalisa..."):
                 final_results = calculate_switching_score(df, period_days)
                 if not final_results.empty:
-                    top_results = final_results.head(50) # Tampilkan 50 teratas
+                    top_results = final_results.head(50)
                     st.success(f"Ditemukan **{len(top_results)}** saham dengan *switching score* tertinggi.")
                     display_df = top_results.style.format({
                         'Switching Score': "{:,.0f}",
@@ -179,10 +191,7 @@ with tab_detail:
             display_data = stock_data[stock_data['Last Trading Date'] >= start_date].copy()
 
             if len(display_data) > 1:
-                # --- Kalkulasi Kartu Metrik ---
-                start_row = display_data.iloc[0]
-                end_row = display_data.iloc[-1]
-                
+                start_row, end_row = display_data.iloc[0], display_data.iloc[-1]
                 delta_local_retail = end_row['Local_Retail'] - start_row['Local_Retail']
                 delta_local_inst = end_row['Local_Institusi'] - start_row['Local_Institusi']
                 delta_foreign_retail = end_row['Foreign_Retail'] - start_row['Foreign_Retail']
@@ -195,7 +204,6 @@ with tab_detail:
                 kpi2.metric("Institusi Lokal", f"{delta_local_inst:,.0f}")
                 kpi3.metric("Ritel Asing", f"{delta_foreign_retail:,.0f}")
                 kpi4.metric("Institusi Asing", f"{delta_foreign_inst:,.0f}")
-                
                 st.divider()
 
                 create_switching_charts(display_data, selected_stock)
