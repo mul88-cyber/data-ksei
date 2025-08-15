@@ -5,69 +5,53 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- Konfigurasi Halaman & CSS Kustom ---
-st.set_page_config(page_title="Dashboard Analisa KSEI", layout="wide")
+st.set_page_config(page_title="Dashboard Analisa Switching KSEI", layout="wide")
 st.markdown("""
 <style>
 /* CSS Kustom */
 button[data-baseweb="tab"] {
     font-size: 18px; font-weight: bold; padding-top: 10px !important; padding-bottom: 10px !important;
 }
-div[data-testid="stMetricValue"] { font-size: 22px; }
-div[data-testid="stMetricLabel"] { font-size: 15px; }
+div[data-testid="stMetricValue"] { font-size: 18px; }
+div[data-testid="stMetricLabel"] { font-size: 14px; color: #a0a0a0; }
 </style>
 """, unsafe_allow_html=True)
-st.title("🚀 Dasbor Analisa Switching Kepemilikan")
+st.title("🚀 Dasbor Analisa Switching Kepemilikan Detail")
 
 # --- Load Data & Kalkulasi ---
 @st.cache_data(ttl=3600)
 def load_data():
-    """Memuat data KSEI dari URL dan menghitung kolom agregat."""
+    """Memuat dan membersihkan data KSEI dari URL."""
     csv_url = "https://storage.googleapis.com/stock-csvku/hasil_gabungan_ksei.csv"
     try:
         df = pd.read_csv(csv_url)
         if 'Date' in df.columns:
             df.rename(columns={'Date': 'Last Trading Date'}, inplace=True)
-
         df['Last Trading Date'] = pd.to_datetime(df['Last Trading Date'], errors='coerce')
-        
-        # --- PERBAIKAN: Hitung kolom agregat di sini ---
-        # 1. Ganti nama kolom Total
-        if 'Total' in df.columns and 'Total.1' in df.columns:
-            df.rename(columns={'Total': 'Total_Local', 'Total.1': 'Total_Foreign'}, inplace=True)
-        
-        # 2. Konversi semua kolom kepemilikan ke numerik
-        owner_cols = [
-            'Price', 'Local IS', 'Local CP', 'Local PF', 'Local IB', 'Local ID', 'Local MF', 'Local SC', 'Local FD', 'Local OT', 'Total_Local',
-            'Foreign IS', 'Foreign CP', 'Foreign PF', 'Foreign IB', 'Foreign ID', 'Foreign MF', 'Foreign SC', 'Foreign FD', 'Foreign OT', 'Total_Foreign'
-        ]
-        for col in owner_cols:
-             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        # 3. Buat grup institusi dan ritel
-        local_institution_cols = ['Local IS', 'Local CP', 'Local PF', 'Local IB', 'Local MF', 'Local SC', 'Local FD', 'Local OT']
-        foreign_institution_cols = ['Foreign IS', 'Foreign CP', 'Foreign PF', 'Foreign IB', 'Foreign MF', 'Foreign SC', 'Foreign FD', 'Foreign OT']
-        
-        df['Local_Retail'] = df.get('Local ID', 0)
-        df['Local_Institusi'] = df[[c for c in local_institution_cols if c in df.columns]].sum(axis=1)
-        df['Foreign_Retail'] = df.get('Foreign ID', 0)
-        df['Foreign_Institusi'] = df[[c for c in foreign_institution_cols if c in df.columns]].sum(axis=1)
-        df['Total_Saham_KSEI'] = df.get('Total_Local', 0) + df.get('Total_Foreign', 0)
-
         df.sort_values(by=['Code', 'Last Trading Date'], inplace=True)
         return df
     except Exception as e:
-        st.error(f"Gagal memuat atau memproses data dari URL: {e}")
+        st.error(f"Gagal memuat data dari URL: {e}")
         return pd.DataFrame()
 
 df = load_data()
+# Definisikan kolom kepemilikan detail
+owner_cols_detail = [
+    'Local IS', 'Local CP', 'Local PF', 'Local IB', 'Local ID', 'Local MF', 'Local SC', 'Local FD', 'Local OT',
+    'Foreign IS', 'Foreign CP', 'Foreign PF', 'Foreign IB', 'Foreign ID', 'Foreign MF', 'Foreign SC', 'Foreign FD', 'Foreign OT'
+]
+# Konversi kolom ke numerik sekali saja di awal
+for col in owner_cols_detail + ['Price']:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
 
 # --- Fungsi Analisa & Scoring ---
 @st.cache_data(ttl=3600)
-def calculate_switching_score(data, period_days):
-    """Menghitung skor switching dari Ritel ke Institusi."""
+def calculate_detailed_switching(data, period_days):
+    """Menghitung switching score detail berdasarkan 18 tipe investor."""
     if data.empty: return pd.DataFrame()
-    results = []
+    
     unique_dates = sorted(data['Last Trading Date'].unique())
     if len(unique_dates) < 2: return pd.DataFrame()
 
@@ -77,95 +61,63 @@ def calculate_switching_score(data, period_days):
     if not available_past_dates: return pd.DataFrame()
     start_date = available_past_dates[-1]
 
-    end_data_df = data[data['Last Trading Date'] == end_date].set_index('Code')
-    start_data_df = data[data['Last Trading Date'] == start_date].set_index('Code')
+    end_df = data[data['Last Trading Date'] == end_date].set_index('Code')
+    start_df = data[data['Last Trading Date'] == start_date].set_index('Code')
     
-    merged_df = end_data_df.join(start_data_df, lsuffix='_end', rsuffix='_start')
+    comparison_df = end_df.join(start_df, lsuffix='_End', rsuffix='_Start')
     
-    # Hitung delta untuk semua grup
-    merged_df['delta_inst_local'] = merged_df['Local_Institusi_end'] - merged_df['Local_Institusi_start']
-    merged_df['delta_inst_foreign'] = merged_df['Foreign_Institusi_end'] - merged_df['Foreign_Institusi_start']
-    merged_df['delta_retail_local'] = merged_df['Local_Retail_end'] - merged_df['Local_Retail_start']
-    merged_df['delta_retail_foreign'] = merged_df['Foreign_Retail_end'] - merged_df['Foreign_Retail_start']
-
-    merged_df['total_inst_change'] = merged_df['delta_inst_local'] + merged_df['delta_inst_foreign']
-    merged_df['total_retail_change'] = merged_df['delta_retail_local'] + merged_df['delta_retail_foreign']
+    delta_cols = []
+    for col in owner_cols_detail:
+        start_col, end_col = f'{col}_Start', f'{col}_End'
+        delta_col_name = f'Delta_{col}'
+        if start_col in comparison_df.columns and end_col in comparison_df.columns:
+            comparison_df[delta_col_name] = comparison_df[end_col] - comparison_df[start_col]
+            delta_cols.append(delta_col_name)
+            
+    comparison_df['Total Switching Value'] = comparison_df[delta_cols].abs().sum(axis=1)
+    result_df = comparison_df.reset_index()
     
-    merged_df['switching_score'] = merged_df['total_inst_change'] - merged_df['total_retail_change']
-    
-    result_df = merged_df.reset_index()
-    
-    final_df = pd.DataFrame({
-        'Saham': result_df['Code'],
-        'Nama Perusahaan': result_df.get('Description_end', result_df['Code']),
-        'Sektor': result_df.get('Sector_end', 'N/A'),
-        'Switching Score': result_df['switching_score'],
-        'Akumulasi Institusi': result_df['total_inst_change'],
-        'Distribusi Ritel': result_df['total_retail_change'],
-    })
-    
-    return final_df.sort_values(by='Switching Score', ascending=False)
+    return result_df.sort_values(by='Total Switching Value', ascending=False)
 
 # --- Fungsi Grafik Detail ---
-def create_switching_charts(data, code):
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-        row_heights=[0.5, 0.5], specs=[[{"secondary_y": False}], [{"secondary_y": True}]],
-        subplot_titles=(f"Pergerakan Harga Saham {code}", "Kepemilikan Absolut (dalam Lembar Saham)")
-    )
-    
-    fig.add_trace(go.Scatter(
-        x=data['Last Trading Date'], y=data['Price'],
-        name='Harga', mode='lines', line=dict(color='cyan', width=2)
-    ), row=1, col=1)
-    
-    investor_groups_inst = ['Local_Institusi', 'Foreign_Institusi']
-    investor_groups_retail = ['Local_Retail', 'Foreign_Retail']
-    colors = {'Local_Institusi': '#1f77b4', 'Local_Retail': '#ff7f0e', 'Foreign_Institusi': '#2ca02c', 'Foreign_Retail': '#d62728'}
-    
-    for group in investor_groups_inst:
-        fig.add_trace(go.Scatter(
-            x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
-            mode='lines', line=dict(width=2.5, color=colors[group])
-        ), secondary_y=False, row=2, col=1)
-
-    for group in investor_groups_retail:
-        fig.add_trace(go.Scatter(
-            x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
-            mode='lines', line=dict(width=2.5, dash='dash', color=colors[group])
-        ), secondary_y=True, row=2, col=1)
-        
-    fig.update_layout(height=800, template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    fig.update_yaxes(title_text="Harga (Rp)", row=1, col=1)
-    fig.update_yaxes(title_text="Kepemilikan Institusi (Lbr)", secondary_y=False, row=2, col=1)
-    fig.update_yaxes(title_text="Kepemilikan Ritel (Lbr)", secondary_y=True, row=2, col=1, showgrid=False)
-    
-    st.plotly_chart(fig, use_container_width=True)
+def create_detail_charts_v2(data, code):
+    # ... (Fungsi ini bisa dikembangkan lebih lanjut jika diperlukan)
+    st.info("Fitur grafik detail untuk analisa switching bisa dikembangkan di sini.")
 
 # --- Tampilan Utama dengan Tab ---
-tab_screener, tab_detail = st.tabs(["🏆 Screener Saham Switching", "📊 Analisa Detail"])
+tab_screener, tab_detail = st.tabs(["🏆 Screener Switching Detail", "📊 Analisa Detail"])
 
 with tab_screener:
-    st.header("🏆 Screener Saham 'Switching'")
-    st.markdown("Menyaring saham berdasarkan **perpindahan kepemilikan terbesar** dari **Ritel** ke **Institusi** dalam periode waktu tertentu.")
+    st.header("🏆 Screener Switching Kepemilikan Detail")
+    st.markdown("Menyaring saham berdasarkan **total perpindahan kepemilikan (gejolak)** terbesar di antara 18 tipe investor dalam periode waktu tertentu.")
 
     if not df.empty:
         period_options = {"1 Bulan Terakhir": 30, "3 Bulan Terakhir": 90, "6 Bulan Terakhir": 180}
         selected_period_label = st.selectbox("Pilih Periode Analisa", options=list(period_options.keys()))
         period_days = period_options[selected_period_label]
 
-        if st.button("Jalankan Analisa Switching", use_container_width=True):
+        if st.button("Jalankan Analisa Switching Detail", use_container_width=True):
             with st.spinner(f"Menganalisa..."):
-                final_results = calculate_switching_score(df, period_days)
+                final_results = calculate_detailed_switching(df, period_days)
                 if not final_results.empty:
                     top_results = final_results.head(50)
-                    st.success(f"Ditemukan **{len(top_results)}** saham dengan *switching score* tertinggi.")
-                    display_df = top_results.style.format({
-                        'Switching Score': "{:,.0f}",
-                        'Akumulasi Institusi': "{:,.0f} lbr",
-                        'Distribusi Ritel': "{:,.0f} lbr"
-                    }).background_gradient(cmap='Greens', subset=['Switching Score'])
-                    st.dataframe(display_df, use_container_width=True, height=800)
+                    st.success(f"Ditemukan **{len(top_results)}** saham dengan *switching value* tertinggi.")
+                    
+                    # Siapkan kolom untuk ditampilkan
+                    display_cols = ['Code', 'Total Switching Value'] + [f'Delta_{col}' for col in owner_cols_detail]
+                    df_to_display = top_results[display_cols]
+                    
+                    # Format angka dan header
+                    rename_cols = {'Code': 'Saham'}
+                    format_dict = {'Total Switching Value': "{:,.0f}"}
+                    for col in display_cols:
+                        if 'Delta' in col:
+                            rename_cols[col] = col.replace('Delta_', '')
+                            format_dict[rename_cols[col]] = "{:,.0f}"
+
+                    display_df = df_to_display.rename(columns=rename_cols)
+                    
+                    st.dataframe(display_df.style.format(format_dict).background_gradient(cmap='Greens', subset=['Total Switching Value']), use_container_width=True, height=800)
                 else:
                     st.warning("Tidak cukup data untuk analisa pada periode yang dipilih.")
     else:
@@ -179,34 +131,52 @@ with tab_detail:
         all_stocks = sorted(df['Code'].unique())
         selected_stock = st.sidebar.selectbox("Pilih Saham", all_stocks, index=all_stocks.index("BBRI") if "BBRI" in all_stocks else 0)
         
-        period_options_detail = {"3 Bulan": 90, "6 Bulan": 180, "1 Tahun": 365, "Semua Data": 9999}
-        selected_period_detail = st.sidebar.selectbox("Pilih Periode Grafik", options=list(period_options_detail.keys()))
-        period_days_detail = period_options_detail[selected_period_detail]
+        period_options_detail = {"1 Bulan": 30, "3 Bulan": 90, "6 Bulan": 180}
+        selected_period_detail_label = st.sidebar.selectbox("Pilih Periode Analisa Detail", options=list(period_options_detail.keys()))
+        period_days_detail = period_options_detail[selected_period_detail_label]
         
         stock_data = df[df['Code'] == selected_stock].copy()
         
-        if not stock_data.empty:
+        if not stock_data.empty and len(stock_data) > 1:
             end_date = stock_data['Last Trading Date'].max()
-            start_date = end_date - pd.DateOffset(days=period_days_detail)
-            display_data = stock_data[stock_data['Last Trading Date'] >= start_date].copy()
+            start_date_target = end_date - pd.DateOffset(days=period_days_detail)
+            
+            # Cari tanggal terdekat yang ada di data
+            available_past_dates = stock_data[stock_data['Last Trading Date'] <= start_date_target]
+            if not available_past_dates.empty:
+                start_date = available_past_dates['Last Trading Date'].max()
+                
+                start_row = stock_data[stock_data['Last Trading Date'] == start_date].iloc[0]
+                end_row = stock_data[stock_data['Last Trading Date'] == end_date].iloc[0]
 
-            if len(display_data) > 1:
-                start_row, end_row = display_data.iloc[0], display_data.iloc[-1]
-                delta_local_retail = end_row['Local_Retail'] - start_row['Local_Retail']
-                delta_local_inst = end_row['Local_Institusi'] - start_row['Local_Institusi']
-                delta_foreign_retail = end_row['Foreign_Retail'] - start_row['Foreign_Retail']
-                delta_foreign_inst = end_row['Foreign_Institusi'] - start_row['Foreign_Institusi']
+                st.markdown(f"#### Ringkasan Perubahan dalam **{selected_period_detail_label}** untuk **{selected_stock}**")
+                st.caption(f"Periode: {start_date.strftime('%d %b %Y')} hingga {end_date.strftime('%d %b %Y')}")
+
+                deltas = {}
+                for col in owner_cols_detail:
+                    deltas[col] = end_row[col] - start_row[col]
                 
-                st.markdown(f"#### Ringkasan Perubahan dalam **{selected_period_detail}** untuk **{selected_stock}**")
+                # Urutkan berdasarkan nilai absolut perubahan
+                sorted_deltas = sorted(deltas.items(), key=lambda item: abs(item[1]), reverse=True)
                 
-                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-                kpi1.metric("Ritel Lokal", f"{delta_local_retail:,.0f}")
-                kpi2.metric("Institusi Lokal", f"{delta_local_inst:,.0f}")
-                kpi3.metric("Ritel Asing", f"{delta_foreign_retail:,.0f}")
-                kpi4.metric("Institusi Asing", f"{delta_foreign_inst:,.0f}")
+                # Pisahkan akumulator dan distributor
+                accumulators = {k: v for k, v in sorted_deltas if v > 0}
+                distributors = {k: v for k, v in sorted_deltas if v < 0}
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("Top Akumulator (Pembeli)")
+                    for i, (investor, change) in enumerate(list(accumulators.items())[:3]):
+                        st.metric(label=investor.replace('_', ' '), value=f"+{change:,.0f} lbr")
+                
+                with col2:
+                    st.subheader("Top Distributor (Penjual)")
+                    for i, (investor, change) in enumerate(list(distributors.items())[:3]):
+                        st.metric(label=investor.replace('_', ' '), value=f"{change:,.0f} lbr")
+                
                 st.divider()
+                st.markdown("Grafik detail bisa dikembangkan di sini untuk menampilkan tren dari top akumulator/distributor.")
 
-                create_switching_charts(display_data, selected_stock)
             else:
                 st.warning(f"Tidak cukup data historis untuk saham {selected_stock} pada periode yang dipilih.")
         else:
