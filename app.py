@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- Konfigurasi Halaman & CSS Kustom ---
-st.set_page_config(page_title="Dashboard Analisa KSEI", layout="wide")
+st.set_page_config(page_title="Dashboard Analisa Switching", layout="wide")
 st.markdown("""
 <style>
 /* CSS Kustom */
@@ -16,7 +16,7 @@ div[data-testid="stMetricValue"] { font-size: 22px; }
 div[data-testid="stMetricLabel"] { font-size: 15px; }
 </style>
 """, unsafe_allow_html=True)
-st.title("🚀 Dasbor Analisa Kepemilikan KSEI")
+st.title("🚀 Dasbor Analisa Switching Kepemilikan")
 
 # --- Load Data & Kalkulasi ---
 @st.cache_data(ttl=3600)
@@ -49,8 +49,8 @@ df = load_data()
 
 # --- Fungsi Analisa & Scoring ---
 @st.cache_data(ttl=3600)
-def calculate_akumulasi_score(data, period_days):
-    """Menghitung skor akumulasi institusi berdasarkan perubahan kepemilikan."""
+def calculate_switching_score(data, period_days):
+    """Menghitung skor switching dari Ritel ke Institusi."""
     if data.empty: return pd.DataFrame()
     results = []
     unique_dates = sorted(data['Last Trading Date'].unique())
@@ -67,43 +67,39 @@ def calculate_akumulasi_score(data, period_days):
     
     merged_df = end_data_df.join(start_data_df, lsuffix='_end', rsuffix='_start')
     
+    # Hitung delta untuk semua grup
     merged_df['delta_inst_local'] = merged_df['Local_Institusi_end'] - merged_df['Local_Institusi_start']
     merged_df['delta_inst_foreign'] = merged_df['Foreign_Institusi_end'] - merged_df['Foreign_Institusi_start']
     merged_df['delta_retail_local'] = merged_df['Local_Retail_end'] - merged_df['Local_Retail_start']
-    merged_df['price_change'] = ((merged_df['Price_end'] - merged_df['Price_start']) / merged_df['Price_start'].replace(0, np.nan)) * 100
+    merged_df['delta_retail_foreign'] = merged_df['Foreign_Retail_end'] - merged_df['Foreign_Retail_start']
+
+    # Hitung total perubahan institusi dan ritel
+    merged_df['total_inst_change'] = merged_df['delta_inst_local'] + merged_df['delta_inst_foreign']
+    merged_df['total_retail_change'] = merged_df['delta_retail_local'] + merged_df['delta_retail_foreign']
+    
+    # Hitung Switching Score
+    merged_df['switching_score'] = merged_df['total_inst_change'] - merged_df['total_retail_change']
     
     result_df = merged_df.reset_index()
     
-    result_df['Skor_Inst_Lokal'] = (result_df['delta_inst_local'] - result_df['delta_inst_local'].mean()) / result_df['delta_inst_local'].std()
-    result_df['Skor_Inst_Asing'] = (result_df['delta_inst_foreign'] - result_df['delta_inst_foreign'].mean()) / result_df['delta_inst_foreign'].std()
-    result_df['Skor_Retail'] = -(result_df['delta_retail_local'] - result_df['delta_retail_local'].mean()) / result_df['delta_retail_local'].std()
-    
-    result_df['Skor Akumulasi'] = (
-        result_df['Skor_Inst_Lokal'].fillna(0) * 0.4 +
-        result_df['Skor_Inst_Asing'].fillna(0) * 0.4 +
-        result_df['Skor_Retail'].fillna(0) * 0.2
-    )
-    result_df.loc[result_df['price_change'] > 0, 'Skor Akumulasi'] += 0.5
-    
     final_df = pd.DataFrame({
-        'Saham': result_df['Code'], 'Nama Perusahaan': result_df.get('Description_end', result_df['Code']),
-        'Sektor': result_df.get('Sector_end', 'N/A'), 'Harga Akhir': result_df['Price_end'],
-        'Perubahan Harga %': result_df['price_change'], 'Akumulasi Inst. Lokal': result_df['delta_inst_local'],
-        'Akumulasi Inst. Asing': result_df['delta_inst_foreign'], 'Perubahan Ritel Lokal': result_df['delta_retail_local'],
-        'Skor Akumulasi': result_df['Skor Akumulasi']
+        'Saham': result_df['Code'],
+        'Nama Perusahaan': result_df.get('Description_end', result_df['Code']),
+        'Sektor': result_df.get('Sector_end', 'N/A'),
+        'Switching Score': result_df['switching_score'],
+        'Akumulasi Institusi': result_df['total_inst_change'],
+        'Distribusi Ritel': result_df['total_retail_change'],
     })
     
-    return final_df.sort_values(by='Skor Akumulasi', ascending=False)
+    return final_df.sort_values(by='Switching Score', ascending=False)
 
 # --- Fungsi Grafik Detail ---
-def create_detail_charts(data, code, view_mode):
-    # Buat subplot dengan 2 baris, di mana baris bawah punya sumbu Y ganda
+def create_switching_charts(data, code):
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         vertical_spacing=0.05,
         row_heights=[0.5, 0.5],
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}]],
-        subplot_titles=(f"Pergerakan Harga Saham {code}", f"Aliran Dana Kepemilikan ({view_mode})")
+        subplot_titles=(f"Pergerakan Harga Saham {code}", "Perubahan Kepemilikan (Delta dari Awal Periode)")
     )
     
     # Grafik 1: Harga
@@ -112,79 +108,59 @@ def create_detail_charts(data, code, view_mode):
         name='Harga', mode='lines', line=dict(color='cyan', width=2)
     ), row=1, col=1)
     
-    # Grafik 2: Aliran Dana Kepemilikan
-    investor_groups_inst = ['Local_Institusi', 'Foreign_Institusi']
-    investor_groups_retail = ['Local_Retail', 'Foreign_Retail']
+    # Grafik 2: Perubahan Kepemilikan
+    investor_groups = ['Local_Institusi', 'Local_Retail', 'Foreign_Institusi', 'Foreign_Retail']
     colors = {'Local_Institusi': '#1f77b4', 'Local_Retail': '#ff7f0e', 'Foreign_Institusi': '#2ca02c', 'Foreign_Retail': '#d62728'}
     
-    if view_mode == 'Nilai Absolut':
-        # Sumbu Y Kiri untuk Institusi
-        for group in investor_groups_inst:
-            fig.add_trace(go.Scatter(
-                x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
-                mode='lines', line=dict(width=2.5, color=colors[group])
-            ), secondary_y=False, row=2, col=1)
+    for group in investor_groups:
+        # Hitung perubahan (delta) dari hari pertama dalam data yang ditampilkan
+        delta_kepemilikan = data[group] - data[group].iloc[0]
+        fig.add_trace(go.Scatter(
+            x=data['Last Trading Date'], y=delta_kepemilikan,
+            name=group.replace('_', ' '), mode='lines',
+            line=dict(width=2.5),
+            fill='tozeroy' if group == investor_groups[0] else 'tonexty',
+            stackgroup='one',
+            marker_color=colors[group]
+        ), row=2, col=1)
 
-        # Sumbu Y Kanan untuk Ritel
-        for group in investor_groups_retail:
-            fig.add_trace(go.Scatter(
-                x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
-                mode='lines', line=dict(width=2.5, dash='dash', color=colors[group])
-            ), secondary_y=True, row=2, col=1)
-        
-        fig.update_yaxes(title_text="Kepemilikan Institusi (Lbr)", secondary_y=False, row=2, col=1)
-        fig.update_yaxes(title_text="Kepemilikan Ritel (Lbr)", secondary_y=True, row=2, col=1, showgrid=False)
-
-    elif view_mode == 'Persentase':
-        # Gunakan 'groupnorm' untuk membuat 100% stacked area chart
-        all_groups = investor_groups_inst + investor_groups_retail
-        for group in all_groups:
-            fig.add_trace(go.Scatter(
-                x=data['Last Trading Date'], y=data[group], name=group.replace('_', ' '),
-                mode='lines', line=dict(width=2.5),
-                fill='tozeroy' if group == all_groups[0] else 'tonexty',
-                stackgroup='one', groupnorm='percent',
-                marker_color=colors[group]
-            ), secondary_y=False, row=2, col=1) # Semua di sumbu Y utama
-        
-        fig.update_yaxes(title_text="Persentase Kepemilikan (%)", secondary_y=False, row=2, col=1, ticksuffix='%')
-        fig.update_yaxes(visible=False, secondary_y=True, row=2, col=1) # Sembunyikan sumbu Y kanan
-
-    fig.update_layout(height=800, template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    fig.update_layout(height=700, template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     fig.update_yaxes(title_text="Harga (Rp)", row=1, col=1)
+    fig.update_yaxes(title_text="Perubahan (Lembar)", row=2, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- Tampilan Utama dengan Tab ---
-tab_top27, tab_detail = st.tabs(["🏆 Top 27 Akumulasi Institusi", "📊 Analisa Detail"])
 
-with tab_top27:
-    st.header("🏆 Top 27 Saham Akumulasi Institusi")
-    st.markdown("Menyaring saham berdasarkan akumulasi bersih oleh **Institusi Lokal & Asing**, serta distribusi oleh **Ritel Lokal** dalam periode waktu tertentu.")
+# --- Tampilan Utama dengan Tab ---
+tab_screener, tab_detail = st.tabs(["🏆 Screener Saham Switching", "📊 Analisa Detail"])
+
+with tab_screener:
+    st.header("🏆 Screener Saham 'Switching'")
+    st.markdown("Menyaring saham berdasarkan **perpindahan kepemilikan terbesar** dari **Ritel** ke **Institusi** dalam periode waktu tertentu.")
 
     if not df.empty:
         period_options = {"1 Bulan Terakhir": 30, "3 Bulan Terakhir": 90, "6 Bulan Terakhir": 180}
         selected_period_label = st.selectbox("Pilih Periode Analisa", options=list(period_options.keys()))
         period_days = period_options[selected_period_label]
 
-        if st.button("Jalankan Analisa", use_container_width=True):
+        if st.button("Jalankan Analisa Switching", use_container_width=True):
             with st.spinner(f"Menganalisa..."):
-                final_results = calculate_akumulasi_score(df, period_days)
+                final_results = calculate_switching_score(df, period_days)
                 if not final_results.empty:
-                    top_27 = final_results.head(27)
-                    st.success(f"Ditemukan **{len(top_27)}** saham dengan akumulasi institusi tertinggi.")
-                    display_df = top_27.style.format({
-                        'Harga Akhir': "Rp {:,.0f}", 'Perubahan Harga %': "{:.2f}%",
-                        'Akumulasi Inst. Lokal': "{:,.0f} lbr", 'Akumulasi Inst. Asing': "{:,.0f} lbr",
-                        'Perubahan Ritel Lokal': "{:,.0f} lbr", 'Skor Akumulasi': "{:.2f}"
-                    }).background_gradient(cmap='Greens', subset=['Skor Akumulasi'])
-                    st.dataframe(display_df, use_container_width=True, height=950)
+                    top_results = final_results.head(50) # Tampilkan 50 teratas
+                    st.success(f"Ditemukan **{len(top_results)}** saham dengan *switching score* tertinggi.")
+                    display_df = top_results.style.format({
+                        'Switching Score': "{:,.0f}",
+                        'Akumulasi Institusi': "{:,.0f} lbr",
+                        'Distribusi Ritel': "{:,.0f} lbr"
+                    }).background_gradient(cmap='Greens', subset=['Switching Score'])
+                    st.dataframe(display_df, use_container_width=True, height=800)
                 else:
                     st.warning("Tidak cukup data untuk analisa pada periode yang dipilih.")
     else:
         st.warning("Gagal memuat data.")
 
 with tab_detail:
-    st.header("📊 Analisa Detail Kepemilikan Saham")
+    st.header("📊 Analisa Detail Switching Kepemilikan")
     if not df.empty:
         st.sidebar.header("🔍 Filter Analisa Detail")
         
@@ -200,18 +176,31 @@ with tab_detail:
         if not stock_data.empty:
             end_date = stock_data['Last Trading Date'].max()
             start_date = end_date - pd.DateOffset(days=period_days_detail)
-            display_data = stock_data[stock_data['Last Trading Date'] >= start_date]
+            display_data = stock_data[stock_data['Last Trading Date'] >= start_date].copy()
 
-            st.markdown(f"Menampilkan analisa untuk **{selected_stock}** dalam **{selected_period_detail}**.")
-            
-            view_mode = st.radio(
-                "Pilih Mode Tampilan Grafik Kepemilikan:",
-                ('Nilai Absolut', 'Persentase'),
-                horizontal=True,
-                label_visibility='collapsed'
-            )
-            
-            create_detail_charts(display_data, selected_stock, view_mode)
+            if len(display_data) > 1:
+                # --- Kalkulasi Kartu Metrik ---
+                start_row = display_data.iloc[0]
+                end_row = display_data.iloc[-1]
+                
+                delta_local_retail = end_row['Local_Retail'] - start_row['Local_Retail']
+                delta_local_inst = end_row['Local_Institusi'] - start_row['Local_Institusi']
+                delta_foreign_retail = end_row['Foreign_Retail'] - start_row['Foreign_Retail']
+                delta_foreign_inst = end_row['Foreign_Institusi'] - start_row['Foreign_Institusi']
+                
+                st.markdown(f"#### Ringkasan Perubahan dalam **{selected_period_detail}** untuk **{selected_stock}**")
+                
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                kpi1.metric("Ritel Lokal", f"{delta_local_retail:,.0f}")
+                kpi2.metric("Institusi Lokal", f"{delta_local_inst:,.0f}")
+                kpi3.metric("Ritel Asing", f"{delta_foreign_retail:,.0f}")
+                kpi4.metric("Institusi Asing", f"{delta_foreign_inst:,.0f}")
+                
+                st.divider()
+
+                create_switching_charts(display_data, selected_stock)
+            else:
+                st.warning(f"Tidak cukup data historis untuk saham {selected_stock} pada periode yang dipilih.")
         else:
             st.warning(f"Tidak ada data untuk saham {selected_stock}.")
     else:
